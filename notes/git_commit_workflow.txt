@@ -1,0 +1,60 @@
+========================================================================
+HOW TO COMMIT THIS REPO (EvoGS) — with the gsplat submodule
+========================================================================
+Repo:      https://github.com/Tung-I/EvoGS.git          (remote: origin, branch: main)
+Submodule: gsplat/  ->  https://github.com/Tung-I/gsplat-lctvgs.git
+           (.gitmodules; inside gsplat the remote "lctvgs" = our fork,
+            "origin" = upstream nerfstudio — do NOT push there)
+           Pinned commit: fca0873 ("PLY init + block-camera finetuning support")
+
+Big binary repo (level PLYs ~600 MB each, residuals.npz ~20 MB). Two traps:
+(1) binaries .gitignore misses, (2) submodule SHA not pushed. Follow in order.
+
+STEP 0 — see what changed
+    cd /work/pi_rsitaram_umass_edu/tungi/EvoGS
+    git status -s
+    git status -sb | head -1            # ahead/behind vs origin/main
+
+STEP 1 — guard against committing huge binaries (THE #1 TRAP)
+  .gitignore excludes results/**/{ply/,levels/,layers/}, *.ply, *.npy, *.npz,
+  *.pt/*.pth, *.bin/*.zst, datasets/. Before staging, list biggest untracked:
+    git ls-files --others --exclude-standard results/ \
+      | while read f; do du -h "$f"; done | sort -rh | head -20
+  Anything >50 MB that is NOT a *.log → STOP and add an ignore rule first.
+
+STEP 2 — handle the gsplat submodule (only if it changed)
+  A modified "gsplat" line = the pointer moved; that SHA MUST be on the
+  submodule's remote or clones break.
+    cd gsplat
+    git log --oneline -1
+    git branch -r --contains HEAD       # must list lctvgs/main (our fork)
+    git push lctvgs HEAD:main           # only if HEAD not already on lctvgs/main
+    cd ..
+  To NOT bump the submodule, don't `git add gsplat`.
+
+STEP 3 — stage, then VERIFY nothing huge slipped in
+    git add -A
+    git diff --cached --name-only | grep -iE '\.(ply|npy|npz|pt|pth|bin|zst)$|ckpts/'   # must be EMPTY
+    git diff --cached --name-only | while read f; do [ -f "$f" ] && du -h "$f"; done | sort -rh | head -12
+    git diff --cached gsplat            # confirm submodule pointer change is intended
+
+STEP 4 — commit (end message with Co-Authored-By)
+    git commit -F - <<'EOF'
+    <short summary>
+
+    - what changed
+    - gsplat submodule -> <short sha> (<why>)   # only if bumped
+
+    Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+    EOF
+
+STEP 5 — push
+    git push origin main
+
+RECOVERY — committed something huge but NOT pushed yet
+    git reset --soft HEAD~1; git restore --staged <bigfile>; add ignore; recommit
+  (After push, removing a big file needs a history rewrite — much harder.)
+
+ONE-LINER (only after you trust .gitignore and the submodule is pushed):
+    git add -A && git commit -m "msg" && git push origin main
+========================================================================

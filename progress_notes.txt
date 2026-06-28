@@ -1,0 +1,32 @@
+EvoGS — running experiment log
+==============================
+
+2026-06-28 — Repo separated from ../lctvgs into its own home (by Claude).
+  - git init (pre-existing), remote origin = github.com/Tung-I/EvoGS.git, branch main
+  - Added gsplat submodule (github.com/Tung-I/gsplat-lctvgs) pinned to fca0873,
+    self-contained (cloned via local --reference then dissociated/repacked).
+  - Copied from ../lctvgs:
+      evogs/{__init__,evolution_tree,train_evogs,eval_evogs}.py + scripts/
+      results/garden_evogs/  (4 level PLYs + *_tree/{topology.json,residuals.npz}
+                              + eval/metrics.json + scene_scale.json; ~2.5 GB local,
+                              big binaries gitignored)
+      notes/evogs_progress.md  (full original implementation + results log)
+  - Edited evogs/scripts/train_garden_evogs.sh: lctvgs paths -> EvoGS.
+  - Verified no remaining "lctvgs" path refs in evogs/ python.
+  - Wrote scaffolding: CLAUDE.md, .gitignore, notes/evogs_paper_summary.md,
+    notes/INHERITED_KNOWLEDGE.md, notes/git_commit_workflow.txt.
+
+STATUS: Garden (Mip-NeRF360) reproduction DONE (symmetric variant) — see
+notes/evogs_progress.md. Native-factor L0..L3 PSNR 29.63/27.83/26.74/26.43,
+beats our LapisGS by avg +0.82 dB on L1-L3.
+
+NEXT (highest value first):
+  1. Trainable ASYMMETRIC alpha (paper headline, ≈+1 dB every level). Current
+     impl is symmetric (alpha=1 init, alpha extracted post-hoc).
+  2. zstd + 8-bit quant compression pipeline (paper L3 347 -> 91.75 MB).
+  3. More scenes: Blender / Tanks&Temples / Deep Blending (need dataset staging).
+  4. Re-run on the matched 'garden_lapis' (200/400/800/1600px) pyramid if comparing
+     directly to LapisGS v5 numbers (see INHERITED_KNOWLEDGE.md section 1).
+
+REMINDER (from lctvgs): establish a ground-truth reference before optimizing;
+the apples-to-apples baseline is our own LapisGS (same gsplat backend).

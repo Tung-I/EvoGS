@@ -1,0 +1,52 @@
+# ============================================================
+# 3DGS artifacts — ignore large binary/data files at any depth
+# Keep: cfg.yml, stats/*.json, eval/*.json, *_info.json, *.log, scene_scale.json
+# (inherited from ../lctvgs, incl. the stray-PLY fix)
+# ============================================================
+
+# Checkpoints, PLY exports, renders, videos, TensorBoard
+results/**/ckpts/
+results/**/ply/
+results/**/renders/
+results/**/videos/
+results/**/tb/
+
+# Seed / init PLY copied into dirs
+results/**/init.ply
+
+# Any stray PLY at a results-dir top level — the ply/ rule only catches files
+# inside a ply/ subdir. (A near-miss 15 GB commit happened in lctvgs.)
+results/**/*.ply
+
+# EvoGS / LapisGS level + tree artifacts (PLYs, residuals, big topology)
+results/**/levels/
+results/**/layers/
+
+# Numpy binaries (residuals.npz, partition masks, etc.)
+results/**/*.npy
+results/**/*.npz
+
+# PyTorch tensors / checkpoints
+results/**/*.pt
+results/**/*.pth
+
+# Compressed bitstreams
+results/**/*.bin
+results/**/*.zst
+
+# Datasets — never committed
+datasets/
+
+# Scratch logs from long SLURM runs
+logs/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.ipynb_checkpoints/
+
+# CUDA extension build artifacts
+build/
+*.so
+*.egg-info/
