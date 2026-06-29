@@ -55,6 +55,7 @@ from datasets.colmap import Dataset, Parser
 from utils import knn, rgb_to_sh, set_random_seed
 
 from evogs.evolution_tree import EvolutionTree
+from evogs.learned_repr import LearnedLeafSet
 
 
 # ---------------------------------------------------------------------------
@@ -104,6 +105,14 @@ class EvoGSConfig:
     split_until: int = 15_000         # stop splitting after this step
     split_frac: float = 0.01          # fraction of active leaves to split per event
     opacity_prune_threshold: float = 0.005
+
+    # ── Learned representation (faithful EvoGS: trainable collinear ψ/α) ────
+    learned_repr: bool = False        # use trainable (ψ, α) instead of free children
+    asymmetric: bool = True           # learn per-attribute α (vs α≡1 symmetric)
+    # "Ancestors frozen" = internal/split nodes (frozen automatically via detached
+    # base snapshots). Frontier leaves (incl. inherited) stay trainable → False.
+    freeze_inherited: bool = False
+    log_alpha_lr: float = 1e-2        # LR for log-α
 
     # ── Stages to run ─────────────────────────────────────────────────────
     stages: List[str] = field(
@@ -612,6 +621,182 @@ def run_levelN(cfg: EvoGSConfig, level_idx: int, device: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Levels 1-3: evolution training with the LEARNED representation (faithful)
+# ---------------------------------------------------------------------------
+
+def run_levelN_learned(cfg: EvoGSConfig, level_idx: int, device: str) -> str:
+    """Evolution level with trainable collinear (ψ, α) children (faithful EvoGS).
+
+    Differs from run_levelN only in the leaf parametrization: instead of two
+    free children + post-hoc ψ/α, split pairs share a trainable ψ and learn a
+    per-attribute α against a frozen parent snapshot. See evogs/learned_repr.py.
+    """
+    assert level_idx in (1, 2, 3), f"level_idx must be 1-3, got {level_idx}"
+
+    level_dir = os.path.join(cfg.result_dir, "levels")
+    os.makedirs(level_dir, exist_ok=True)
+    leaves_ply = os.path.join(level_dir, f"level_{level_idx:02d}_leaves.ply")
+    tree_dir   = os.path.join(level_dir, f"level_{level_idx:02d}_tree")
+
+    if os.path.exists(leaves_ply):
+        print(f"[Level {level_idx}] Already exists: {leaves_ply}")
+        return leaves_ply
+
+    factor    = cfg.data_factors[level_idx]
+    prior_ply = os.path.join(level_dir, f"level_{level_idx-1:02d}_leaves.ply")
+    mode = "asymmetric" if cfg.asymmetric else "symmetric"
+    print(f"\n{'─'*70}")
+    print(f"[Level {level_idx}] LEARNED-REPR ({mode}, freeze_inherited="
+          f"{cfg.freeze_inherited}) at factor={factor} ({cfg.steps_per_level} steps)")
+    print(f"[Level {level_idx}] Starting from: {prior_ply}")
+    print(f"{'─'*70}")
+
+    # ── Scene scale ───────────────────────────────────────────────────────
+    ss_path = os.path.join(cfg.result_dir, "scene_scale.json")
+    if os.path.exists(ss_path):
+        with open(ss_path) as _f:
+            scene_scale = json.load(_f)["scene_scale"]
+    else:
+        p_tmp = Parser(cfg.data_dir, factor=cfg.data_factors[0], normalize=True, test_every=1)
+        scene_scale = float(p_tmp.scene_scale) * 1.1
+
+    # ── Dataset ───────────────────────────────────────────────────────────
+    parser = Parser(
+        data_dir=cfg.data_dir, factor=factor,
+        normalize=cfg.normalize_world_space, test_every=cfg.test_every,
+    )
+    trainset = Dataset(parser, split="train")
+    valset   = Dataset(parser, split="val")
+    print(f"[Level {level_idx}] Train: {len(trainset)} imgs, Val: {len(valset)} imgs @ factor={factor}")
+
+    # ── Load prior leaves; build learned leaf set ─────────────────────────
+    raw = _load_ply_as_splats(prior_ply, cfg, device)
+    raw = {k: v.to(device) for k, v in raw.items()}
+    lls = LearnedLeafSet(raw, device, asymmetric=cfg.asymmetric,
+                         freeze_inherited=cfg.freeze_inherited)
+    print(f"[Level {level_idx}] Starting leaves: {lls.N:,}")
+
+    lls.set_lr_spec({
+        "means":     cfg.means_lr * scene_scale,
+        "scales":    cfg.scales_lr,
+        "quats":     cfg.quats_lr,
+        "opacities": cfg.opacities_lr,
+        "sh0":       cfg.sh0_lr,
+        "shN":       cfg.shN_lr,
+        "log_alpha": cfg.log_alpha_lr,
+    })
+
+    evo_state = {
+        "grad2d": torch.zeros(lls.N, device=device),
+        "count":  torch.zeros(lls.N, device=device),
+    }
+
+    psnr_m  = PeakSignalNoiseRatio(data_range=1.0).to(device)
+    ssim_m  = StructuralSimilarityIndexMeasure(data_range=1.0).to(device)
+    lpips_m = LearnedPerceptualImagePatchSimilarity(net_type="alex", normalize=True).to(device)
+    writer  = SummaryWriter(log_dir=os.path.join(cfg.result_dir, "tb", f"level{level_idx}"))
+
+    trainloader = torch.utils.data.DataLoader(
+        trainset, batch_size=cfg.batch_size, shuffle=True,
+        num_workers=4, persistent_workers=True, pin_memory=True,
+    )
+    trainloader_iter = iter(trainloader)
+
+    pbar = tqdm.tqdm(range(cfg.steps_per_level),
+                     desc=f"Level {level_idx} (learned, factor={factor})")
+    for step in pbar:
+        try:
+            data = next(trainloader_iter)
+        except StopIteration:
+            trainloader_iter = iter(trainloader)
+            data = next(trainloader_iter)
+
+        camtoworlds = data["camtoworld"].to(device)
+        Ks = data["K"].to(device)
+        pixels = data["image"].to(device) / 255.0
+        height, width = pixels.shape[1:3]
+        sh_degree_to_use = min(step // cfg.sh_degree_interval, cfg.sh_degree)
+
+        # ── Reconstruct active leaves, then rasterize ─────────────────────
+        recon = lls.reconstruct()
+        renders, alphas, info = rasterize_splats(
+            recon, camtoworlds, Ks, width, height,
+            sh_degree=sh_degree_to_use, packed=cfg.packed,
+            near_plane=cfg.near_plane, far_plane=cfg.far_plane,
+        )
+        colors = renders[..., :3]
+        info["means2d"].retain_grad()
+
+        l1   = l1_loss(colors, pixels).mean()
+        ssim = ssim_loss(colors.permute(0, 3, 1, 2), pixels.permute(0, 3, 1, 2))
+        loss = torch.lerp(l1, ssim, cfg.ssim_lambda)
+        loss.backward()
+
+        _accumulate_grad2d(evo_state, info, packed=cfg.packed)
+
+        pbar.set_description(
+            f"L{level_idx} loss={loss.item():.3f} #leaves={lls.N:,}"
+        )
+
+        lls.step()
+        lls.scale_means_lr(0.01 ** (step / cfg.steps_per_level))
+
+        info.pop("isect_ids", None)
+        info.pop("flatten_ids", None)
+
+        # ── Evolution split events ────────────────────────────────────────
+        if step > 0 and step % cfg.split_every == 0 and step <= cfg.split_until:
+            n_active = lls.N
+            avg_grad = evo_state["grad2d"] / evo_state["count"].clamp_min(1)
+            n_split = max(1, int(n_active * cfg.split_frac))
+            n_split = min(n_split, n_active - 1)
+            _, top_idx = avg_grad.topk(n_split)
+            split_mask = torch.zeros(n_active, dtype=torch.bool, device=device)
+            split_mask[top_idx] = True
+
+            lls.split(split_mask, level_idx)
+
+            with torch.no_grad():
+                opa = torch.sigmoid(lls.reconstruct()["opacities"].flatten())
+            prune_mask = opa < cfg.opacity_prune_threshold
+            n_pruned = lls.prune(prune_mask)
+
+            evo_state["grad2d"] = torch.zeros(lls.N, device=device)
+            evo_state["count"]  = torch.zeros(lls.N, device=device)
+            print(f"\n[Level {level_idx}] Step {step}: split {int(split_mask.sum())} | "
+                  f"pruned {n_pruned} | active leaves: {lls.N:,}")
+            writer.add_scalar(f"L{level_idx}/num_leaves", lls.N, step)
+            torch.cuda.empty_cache()
+
+        if step % 500 == 0:
+            writer.add_scalar(f"L{level_idx}/loss", loss.item(), step)
+            if cfg.asymmetric:
+                writer.add_scalar(f"L{level_idx}/alpha_mean",
+                                  lls.alpha().mean().item(), step)
+
+        if step in (6999, cfg.steps_per_level - 1):
+            _eval_splats(lls.materialize(), valset, device, cfg,
+                         psnr_m, ssim_m, lpips_m, tag=f"L{level_idx}@{step}")
+
+    # ── Save materialized leaves + exact tree residuals ───────────────────
+    leaves_dict = {k: v.cpu() for k, v in lls.materialize().items()}
+    _save_full_ply(leaves_dict, leaves_ply)
+    ply_mb = os.path.getsize(leaves_ply) / 1e6
+    print(f"[Level {level_idx}] Active leaves: {lls.N:,} → {leaves_ply} ({ply_mb:.1f} MB)")
+
+    info_tree = lls.save(tree_dir)
+    topo_mb = os.path.getsize(os.path.join(tree_dir, "topology.json")) / 1e6
+    res_path = os.path.join(tree_dir, "residuals.npz")
+    res_mb = os.path.getsize(res_path) / 1e6 if os.path.exists(res_path) else 0.0
+    print(f"[Level {level_idx}] Tree: {len(lls.splits)} splits | "
+          f"{info_tree.get('n_residual_pairs', 0)} residual pairs | "
+          f"topology {topo_mb:.2f} MB | residuals {res_mb:.2f} MB")
+
+    writer.close()
+    return leaves_ply
+
+
+# ---------------------------------------------------------------------------
 # Evaluation: per-level metrics at native resolution
 # ---------------------------------------------------------------------------
 
@@ -709,17 +894,22 @@ def main(cfg: EvoGSConfig):
     print(f"[EvoGS] Evolution splits: every {cfg.split_every} steps until {cfg.split_until}")
     print(f"[EvoGS] Split fraction: {cfg.split_frac:.1%} of active leaves per event")
 
+    level_fn = run_levelN_learned if cfg.learned_repr else run_levelN
+    if cfg.learned_repr:
+        print(f"[EvoGS] Learned representation: asymmetric={cfg.asymmetric}, "
+              f"freeze_inherited={cfg.freeze_inherited}")
+
     if "level0" in stages:
         run_level0(cfg, device)
 
     if "level1" in stages:
-        run_levelN(cfg, level_idx=1, device=device)
+        level_fn(cfg, level_idx=1, device=device)
 
     if "level2" in stages:
-        run_levelN(cfg, level_idx=2, device=device)
+        level_fn(cfg, level_idx=2, device=device)
 
     if "level3" in stages:
-        run_levelN(cfg, level_idx=3, device=device)
+        level_fn(cfg, level_idx=3, device=device)
 
     if "eval" in stages:
         run_eval(cfg, device)
