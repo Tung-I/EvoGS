@@ -30,3 +30,39 @@ NEXT (highest value first):
 
 REMINDER (from lctvgs): establish a ground-truth reference before optimizing;
 the apples-to-apples baseline is our own LapisGS (same gsplat backend).
+
+================================================================================
+2026-06-29 — Learned representation + compression + A/B (by Claude)
+================================================================================
+Implemented the FAITHFUL EvoGS machinery the skeleton stubbed:
+  evogs/learned_repr.py  LearnedLeafSet: split children share a trainable ψ and
+    learn per-attribute α against a FROZEN parent snapshot (C1=base+ψ,
+    C2=base−α⊙ψ, exact collinearity). Residuals are stored params (exact, not
+    post-hoc least-squares). "Ancestors frozen" = internal nodes (auto via
+    detached base); frontier leaves trainable.
+  evogs/train_evogs.py   flags --learned-repr/--asymmetric/--freeze-inherited +
+    run_levelN_learned.
+  evogs/compress_evogs.py  8-bit + zstd (means 16-bit) of root + ψ/α residuals,
+    with decode→render ΔPSNR.
+
+KEY RESULT (relaxed regime, freeze_inherited=False), garden native res:
+  L1 asym 27.787 / sym 27.796 / skeleton 27.83
+  L2 asym 26.761 / sym 26.752 / 26.74
+  L3 asym 26.486 / sym 26.466 / 26.46
+  → asym ≈ sym ≈ skeleton (|Δ|≤0.02 dB). Faithful repr MATCHES free training at
+    ~4% fewer GS + exact 25MB residuals, but learned α is a NO-OP here — does NOT
+    reproduce the paper's +1 dB (Table 2). Cause: free frontier training already
+    saturates quality → no headroom for α. See notes/learned_repr_findings.md.
+
+COMPRESSION (asym/sym L3): render footprint 589→~100 MB (5.9×), ΔPSNR −0.10..−0.22
+  dB — matches paper shape (91.75 MB / −0.10). Pitfall fixed: 8-bit ABSOLUTE
+  means = −12 dB; use 16-bit means.
+
+IN PROGRESS: strict-regime A/B (--freeze-inherited; refinement only via split ψ)
+  to test whether α helps under constraint. asym_strict L1=25.79 (underfits ~2dB
+  vs relaxed, as expected). sym_strict pending. Results → learned_repr_findings.md.
+
+Result dirs: results/garden_evogs_{asym,sym}{,_strict}/ (L0 reuses skeleton's).
+
+NEXT: finish strict A/B + document; optional garden_lapis (LapisGS apples-to-
+  apples) and a 2nd Mip360 scene (bicycle). Compression done; relaxed A/B done.
