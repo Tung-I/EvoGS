@@ -41,18 +41,26 @@ from evogs.train_evogs import EvoGSConfig, _load_ply_as_splats, _eval_splats
 _ZSTD_LEVEL = 19
 
 
-def _quantize_8bit(x: np.ndarray):
-    """Per-column 8-bit uniform quant of a [N, D] float array."""
+# Per-parameter bit depth. `means` get 16 bits: at scene scale, 8-bit absolute
+# positions give ~extent/256 error → catastrophic (−12 dB). Everything else
+# 8-bit (paper §5 PoC). Residual ψ/α default to 8-bit too (small deltas).
+BIT_DEPTH = {"means": 16, "quats": 8, "scales": 8, "opacities": 8,
+             "sh0": 8, "shN": 8, "psi": 8, "alpha": 8}
+
+
+def _quantize(x: np.ndarray, bits: int):
+    """Per-column uniform quant of a [N, D] float array to `bits` bits."""
     x = x.reshape(x.shape[0], -1).astype(np.float32)
     mn = x.min(axis=0)
-    mx = x.max(axis=0)
-    scale = np.clip(mx - mn, 1e-12, None)
-    q = np.round((x - mn) / scale * 255.0).clip(0, 255).astype(np.uint8)
+    scale = np.clip(x.max(axis=0) - mn, 1e-12, None)
+    levels = float((1 << bits) - 1)
+    dtype = np.uint16 if bits > 8 else np.uint8
+    q = np.round((x - mn) / scale * levels).clip(0, levels).astype(dtype)
     return q, mn.astype(np.float32), scale.astype(np.float32)
 
 
-def _dequantize_8bit(q, mn, scale):
-    return q.astype(np.float32) / 255.0 * scale + mn
+def _dequantize(q, mn, scale, bits: int):
+    return q.astype(np.float32) / float((1 << bits) - 1) * scale + mn
 
 
 def _zstd_bytes(arr: np.ndarray) -> int:
@@ -61,19 +69,19 @@ def _zstd_bytes(arr: np.ndarray) -> int:
 
 
 def _compress_param_dict(tensors: dict):
-    """8-bit quant + zstd a dict of float tensors. Returns (raw_b, q8_b, zstd_b,
-    dequantized dict)."""
-    raw_b = q8_b = zstd_b = 0
+    """Per-param quant (BIT_DEPTH) + zstd. Returns (raw_b, q_b, zstd_b, deq)."""
+    raw_b = q_b = zstd_b = 0
     deq = {}
     for k, v in tensors.items():
         a = v.detach().cpu().numpy() if torch.is_tensor(v) else np.asarray(v)
         shape = a.shape
-        q, mn, scale = _quantize_8bit(a)
+        bits = BIT_DEPTH.get(k, 8)
+        q, mn, scale = _quantize(a, bits)
         raw_b += a.astype(np.float32).nbytes
-        q8_b += q.nbytes + mn.nbytes + scale.nbytes
+        q_b += q.nbytes + mn.nbytes + scale.nbytes
         zstd_b += _zstd_bytes(q) + mn.nbytes + scale.nbytes
-        deq[k] = torch.from_numpy(_dequantize_8bit(q, mn, scale).reshape(shape))
-    return raw_b, q8_b, zstd_b, deq
+        deq[k] = torch.from_numpy(_dequantize(q, mn, scale, bits).reshape(shape))
+    return raw_b, q_b, zstd_b, deq
 
 
 @dataclass
