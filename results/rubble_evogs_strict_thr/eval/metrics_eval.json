@@ -1,0 +1,54 @@
+[
+  {
+    "psnr": 26.863502502441406,
+    "ssim": 0.9030139446258545,
+    "lpips": 0.061617862433195114,
+    "num_GS": 2474187,
+    "level": 0,
+    "factor": 32,
+    "train_factor": 32,
+    "eval_factor": 32,
+    "transparent_frac": 0.6568,
+    "leaves_mb": 583.91,
+    "tree_mb": 0.0
+  },
+  {
+    "psnr": 26.405466079711914,
+    "ssim": 0.8586347699165344,
+    "lpips": 0.10918822884559631,
+    "num_GS": 2453707,
+    "level": 1,
+    "factor": 16,
+    "train_factor": 16,
+    "eval_factor": 16,
+    "transparent_frac": 0.3881,
+    "leaves_mb": 579.08,
+    "tree_mb": 183.58
+  },
+  {
+    "psnr": 24.97690200805664,
+    "ssim": 0.7591004967689514,
+    "lpips": 0.2292015701532364,
+    "num_GS": 3456331,
+    "level": 2,
+    "factor": 8,
+    "train_factor": 8,
+    "eval_factor": 8,
+    "transparent_frac": 0.305,
+    "leaves_mb": 815.7,
+    "tree_mb": 240.0
+  },
+  {
+    "psnr": 23.557573318481445,
+    "ssim": 0.6432656645774841,
+    "lpips": 0.38119232654571533,
+    "num_GS": 4886366,
+    "level": 3,
+    "factor": 4,
+    "train_factor": 4,
+    "eval_factor": 4,
+    "transparent_frac": 0.2419,
+    "leaves_mb": 1153.18,
+    "tree_mb": 335.96
+  }
+]

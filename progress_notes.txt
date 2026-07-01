@@ -66,3 +66,176 @@ Result dirs: results/garden_evogs_{asym,sym}{,_strict}/ (L0 reuses skeleton's).
 
 NEXT: finish strict A/B + document; optional garden_lapis (LapisGS apples-to-
   apples) and a 2nd Mip360 scene (bicycle). Compression done; relaxed A/B done.
+
+================================================================================
+2026-06-29 (later) — Strict-regime A/B COMPLETE + strict compression (by Claude)
+================================================================================
+sym_strict had crashed mid-L1 (gpu046 session ended); re-ran run_strict_ab.sh on
+gypsum-gpu182 (RTX 8000) — asym_strict skipped (idempotent), sym_strict retrained
+L1-L3 + eval. Both strict L3 then compressed.
+
+STRICT A/B (garden, native res, freeze_inherited=True):
+  L1 asym 25.793 / sym 25.675 (+0.118)
+  L2 asym 23.975 / sym 23.842 (+0.134)
+  L3 asym 23.584 / sym 23.425 (+0.159)
+  → asym beats sym at EVERY level, gap GROWS with depth = paper's predicted sign
+    (Table 2). BUT magnitude ~6× too small (+0.16 vs +0.8..1.0 dB) AND both strict
+    variants underfit ~3 dB vs relaxed/skeleton (~26.5). Strict freezing starves
+    refinement capacity.
+
+VERDICT: learned α is real and correctly signed, but the binding constraint is the
+  SPLIT MECHANISM, not the α parametrization. Our 1% top-k split budget makes far
+  too few children vs the paper's gradient THRESHOLD. Relaxed saturates (α no-op);
+  strict starves (α helps a little, all underfits). Highest-value next step:
+  swap top-k split budget → gradient-threshold split criterion.
+
+STRICT COMPRESSION (L3, 8-bit+zstd, 16-bit means):
+  asym 710.0→86.8 MB (8.2×, ΔPSNR −0.36); sym 709.4→135.4 MB (5.2×, ΔPSNR −0.02).
+  asym leaves compress better; streamed storage ~150 MB both. → eval/compress_L3.json.
+
+Full writeup: notes/learned_repr_findings.md (strict section filled).
+NEXT (open): gradient-threshold split criterion (to close the magnitude gap);
+  garden_lapis apples-to-apples; 2nd Mip360 scene (bicycle).
+
+================================================================================
+2026-06-30 — Gradient-threshold split criterion: IMPLEMENTED, run IN PROGRESS
+================================================================================
+CODE (committed-pending, evogs/train_evogs.py): added split-selection criterion.
+  New EvoGSConfig flags: --split-mode {topk|threshold}, --split-grad-threshold τ,
+  --split-max-frac (per-event safety cap). Shared helper _select_split_mask()
+  drives both run_levelN_learned (primary) and run_levelN (skeleton); logs
+  avg_grad quantiles + n_selected at every split event. topk path = unchanged
+  default, so all prior results reproduce.
+
+CALIBRATION (garden L1, step-3000 avg_grad): p50 2.5e-5 / p90 1.16e-4 /
+  p95 1.63e-4 / p99 2.87e-4 / max 5.2e-3. top-k 1% splits at ≈p99. Chose
+  τ=2e-4 (standard 3DGS grow_grad2d; between p95 and p99) → ~4% selected at
+  event 1 (4× top-k), cap (5%) not binding → tests the criterion, not the cap.
+
+RUN: results/garden_evogs_asym_thr/ — relaxed asymmetric, threshold τ=2e-4,
+  --split-max-frac 0.05, on gypsum-gpu182 (RTX 8000). RESUME POINT: L0/L1/L2
+  PLYs saved (idempotent → skipped); only L3 + eval remain. GPU usage was light
+  (~7.6 GB at L1). L1 leaves 2.686M vs top-k baseline 2.559M (+5%); L2 2.869M.
+  To resume: re-run the same command (env block as run_strict_ab.sh):
+    python evogs/train_evogs.py --data-dir $GARDEN \
+      --result-dir results/garden_evogs_asym_thr --learned-repr --asymmetric \
+      --split-mode threshold --split-grad-threshold 2e-4 --split-max-frac 0.05 \
+      --stages level3 eval        # (level1 level2 already done)
+  Log: logs/garden_asym_thr.log. Process gracefully terminated 2026-06-30 (session end).
+
+REMAINING (tasks 8-9): after L3+eval, compress L1/L2/L3 both arms (backfill
+  baseline garden_evogs_asym L1/L2), tabulate RD (PSNR vs streamed_zstd_mb)
+  threshold vs top-k, then document in learned_repr_findings.md + memory.
+
+================================================================================
+2026-06-30 (later) — Gradient-threshold split: COMPLETE + RD verdict (by Claude)
+================================================================================
+Resumed garden_evogs_asym_thr (gypsum-gpu182, RTX 8000): L3+eval finished
+(L0-L2 idempotent-skipped), then compressed L1/L2/L3 of the threshold arm and
+backfilled baseline garden_evogs_asym L1/L2 for the RD curve.
+
+THRESHOLD vs TOP-K (relaxed asym, garden native res):
+  PSNR    L1 27.814/27.787 (+0.027)  L2 26.819/26.761 (+0.058)  L3 26.477/26.486 (-0.009)
+  Leaves  L1 2.686M/2.559M (+5%)     L2 2.869M           L3 3.053M/2.498M (+22%)
+  Stream  L3 178.2 MB (thr) vs 153.4 MB (topk); decode ΔPSNR L3 -1.312 vs -0.222.
+  Split decay (L3): 142.5k->99.2k->64.0k->41.1k->26.4k; --split-max-frac 0.05 cap
+    BINDS at the first L3 event (cap, not τ, governs at deep levels).
+
+VERDICT: threshold is STRICTLY DOMINATED by top-k on the RD frontier in the
+  relaxed regime — +22% leaves & +16% storage at L3 for -0.009 dB, and the extra
+  marginal children quantize much worse (-1.31 vs -0.22 dB). Confirms relaxed
+  training is SATURATED: more children buy no quality, only hurt RD. The split
+  criterion alone does NOT recover the paper's +1 dB headline; the missing
+  ingredient is the constrained (strict) regime. Likely path to the paper number:
+  threshold split COMBINED WITH strict freezing (more children AND α headroom),
+  not either alone. Full writeup: notes/learned_repr_findings.md.
+
+================================================================================
+2026-06-30 (later) — garden_lapis apples-to-apples COMPLETE (by Claude)
+================================================================================
+EvoGS on matched 200/400/800/1600px pyramid (garden_lapis), relaxed asym, two
+arms (top-k vs threshold), eval native, vs LapisGS v5. RESULT (PSNR | #GS):
+  L0  topk 32.242 | thr 32.298 | Lapis 32.256   (813k/816k vs 808k)
+  L1  topk 30.845 | thr 30.936 | Lapis 30.806   (669k/771k vs 2.14M)
+  L2  topk 28.682 | thr 28.885 | Lapis 29.024   (666k/920k vs 4.66M)
+  L3  topk 26.495 | thr 26.891 | Lapis 26.971   (683k/1.13M vs 7.7M)
+
+BIG FINDING — REVERSES the raw-garden threshold no-op: here threshold beats top-k
+  by +0.09/+0.20/+0.40 dB (gain GROWS with depth), and threshold L3 (26.891)
+  essentially MATCHES LapisGS (26.971, -0.08 dB) at 6.8x fewer Gaussians (1.13M vs
+  7.7M); beats LapisGS at L1 (+0.13) at 2.8x fewer. Reconciliation: the lever is
+  STARVED vs SATURATED, not resolution. Raw-garden top-k was ~2.5M leaves at full
+  res (saturated -> threshold no-op). garden_lapis top-k is UNDER-densified: leaf
+  count nearly FLAT across levels (669k->666k->683k) because 1% top-k can't keep
+  up with the aggressive LapisGS pyramid; threshold grows 771k->920k->1.13M and
+  recovers the L2/L3 deficit. So gradient-threshold split is the right criterion
+  precisely when the budget would otherwise starve the model.
+
+STORAGE (L3, 8-bit+zstd): topk 43.4 MB streamed (leaves 161->28.7 MB), thr 62.5 MB
+  (leaves 267->43.8 MB); even compressed, thr 26.425 > topk 26.161 (+0.26). LapisGS
+  v5 is uncompressed (L3 delta 669.8 / full 1817.6 MB) -> EvoGS ~7-11x smaller
+  uncompressed, ~30-44x with q8+zstd. Files: results/garden_lapis_evogs_{asym,
+  asym_thr}/eval/{metrics,compress_L3}.json. Scripts: run_garden_lapis.sh,
+  compress_garden_lapis_L3.sh.
+
+NEXT (open): threshold+strict COMBINED regime (now the most promising path to the
+  paper's +1 dB headline — more children AND α headroom, motivated by both the
+  raw-garden saturation and the garden_lapis starvation findings); 2nd Mip360
+  scene (bicycle); optional per-channel attribute audit of the raw-garden L3
+  threshold compression outlier (-1.31 dB).
+
+================================================================================
+2026-07-01 — CITY-SCALE RUBBLE: EvoGS strict-threshold RUN IN PROGRESS (by Claude)
+================================================================================
+NEW STUDY (plan: ~/.claude/plans/zesty-kindling-stardust.md). Question: does
+EvoGS's parent-replacement + ψ-lineage (S=root+Σψ_k) fix the ERROR ACCUMULATION
+that made frozen-base LapisGS FAIL on city-scale Rubble? LapisGS Rubble L3@f4 =
+22.61 dB @ 15.1M GS vs vanilla 25.29 @ 6.9M (−2.68 dB, more GS yet worse; cost
+scales with scene extent). Decisive test = STRICT regime (ancestors frozen like
+LapisGS; correction only via split-child ψ). Relaxed out of scope (conflates
+correction with re-training).
+
+DATASET: ../lctvgs/datasets/rubble_sfm_v2 (1449 train/208 val, 4608×3456, 1 cam),
+pyramid [32,16,8,4] (matches LapisGS Rubble). Refs: LapisGS
+../lctvgs/results/rubble_lapisgs/eval/{metrics,metrics_fixed_factor4}.json;
+vanilla ../lctvgs/results/rubble_vanilla_sfm (25.29@f4).
+
+CODE: eval_evogs.py gained --eval-factor (fixed-res streaming ladder, mirrors
+LapisGS metrics_fixed_factor4.json) + per-level transparency_frac (paper Table 3).
+Script: evogs/scripts/run_rubble_evogs.sh (env vars RESULT/TAU/CAP/STEPS/STAGES).
+
+SMOKE (results/rubble_evogs_smoke, L0+L1 @3200 steps) PASSED: no divergence,
+scene_scale=1.94 (normalized OK), threshold split works. CALIBRATION (L1 step-3000
+avg_grad): p50 1.7e-5 / p90 8.1e-5 / p95 1.21e-4 / p99 2.61e-4 / max 3.9e-3 (≈
+garden). CHOSE τ=1e-4, cap=0.08 (τ governs at ~7%, cap only guards OOM; generous
+to avoid starving strict regime).
+
+FULL RUN: results/rubble_evogs_strict_thr/, strict+learned+asym+threshold, 4 levels
+×30k + eval. gpu045 (L40S), ~2h15m, EXIT=0. RESUME: idempotent — re-run same
+RESULT=... TAU=1e-4 CAP=0.08 bash evogs/scripts/run_rubble_evogs.sh.
+
+RESULT — HYPOTHESIS CONFIRMED (full writeup notes/rubble_evogs_findings.md):
+  Fixed factor-4 ladder (EvoGS | LapisGS | Δ): L0 19.35|19.25|+0.09;
+    L1 20.93|20.37|+0.56; L2 22.88|21.99|+0.90; L3 23.56|22.61|+0.95.
+    Gap over LapisGS GROWS with depth = error-accumulation signature.
+  #GS L3: EvoGS 4.89M vs LapisGS 15.10M (3.1× fewer). vanilla@f4 24.21(30k)/25.29(60k).
+  KEY: EvoGS strict (ancestors FROZEN, 23.56) ≈ unfrozen+finetuned LapisGS (23.67)
+    WITHOUT unfreezing → replace+ψ lineage recovers the ≈+1 dB that LapisGS needed
+    unfreezing for. Isolates architecture (not "let base move") as the fix.
+  Transparency (alpha<0.05, same threshold): LapisGS 65.7/63.1/57.7/52.9%
+    (L3=8.0M ghosts of 15.1M) vs EvoGS 65.7/38.8/30.5/24.2% (L3=1.2M of 4.89M).
+    Both identical at L0; EvoGS leans out, LapisGS stays bloated. EvoGS L3 24.2%
+    ≈ paper Table-3 (24.9%). Direct confirmation of the redundancy mechanism.
+  Storage L3 (q8+zstd): render 1153→169 MB (6.8×, ΔPSNR −0.46); streamed 224 MB
+    vs LapisGS cumulative 3564 MB uncompressed (~16×).
+  NUANCE (honest): EvoGS L3 still −0.65 vs 30k-vanilla, −1.73 vs 60k-vanilla.
+    Accumulation was the MAJOR cause (EvoGS closes ~64% of frozen→60k gap) but a
+    residual capacity gap remains, not attributable to the freeze (unfrozen LapisGS
+    also stalled at 23.67).
+
+CODE: eval_evogs.py +--eval-factor (fixed-res ladder, mirrors LapisGS
+  metrics_fixed_factor4.json) +per-level transparency_frac. Script
+  evogs/scripts/run_rubble_evogs.sh. Smoke dir results/rubble_evogs_smoke.
+
+NEXT (open, Rubble): relaxed-regime contrast (how much the freeze still costs /
+  upper bound); cap sweep for the residual capacity gap; 2nd city-scale scene.

@@ -103,7 +103,13 @@ class EvoGSConfig:
     # ── Evolution splits (levels 1-3) ─────────────────────────────────────
     split_every: int = 3_000          # evolution split event every N steps
     split_until: int = 15_000         # stop splitting after this step
-    split_frac: float = 0.01          # fraction of active leaves to split per event
+    split_frac: float = 0.01          # (topk mode) fraction of active leaves to split per event
+    # Split-selection criterion: "topk" = fixed split_frac budget by avg 2D grad;
+    # "threshold" = split every leaf whose avg 2D grad exceeds split_grad_threshold
+    # (paper-style densification), capped at split_max_frac per event.
+    split_mode: str = "topk"          # "topk" | "threshold"
+    split_grad_threshold: float = 2e-4  # (threshold mode) τ on avg 2D grad norm
+    split_max_frac: float = 0.05      # (threshold mode) safety cap: max frac split/event
     opacity_prune_threshold: float = 0.005
 
     # ── Learned representation (faithful EvoGS: trainable collinear ψ/α) ────
@@ -286,6 +292,48 @@ def _accumulate_grad2d(evo_state: dict, info: dict, packed: bool = True):
 
     evo_state["grad2d"].index_add_(0, gs_ids, grads.norm(dim=-1))
     evo_state["count"].index_add_(0, gs_ids, torch.ones_like(gs_ids, dtype=torch.float32))
+
+
+@torch.no_grad()
+def _select_split_mask(avg_grad: torch.Tensor, cfg, level_idx: int, step: int):
+    """Pick which leaves to split this event.
+
+    Returns a boolean mask over active leaves. Two criteria:
+      - "topk":      fixed budget — top split_frac of leaves by avg 2D grad.
+      - "threshold": all leaves with avg 2D grad > split_grad_threshold (τ),
+                     capped at split_max_frac per event (keep highest-grad).
+    Always prints avg_grad quantiles + the resulting selection for calibration.
+    """
+    n_active = avg_grad.numel()
+    device = avg_grad.device
+    q = torch.tensor([0.5, 0.9, 0.95, 0.99], device=device)
+    p50, p90, p95, p99 = (avg_grad.quantile(q)).tolist()
+    gmax = float(avg_grad.max())
+
+    mask = torch.zeros(n_active, dtype=torch.bool, device=device)
+    cap = max(1, min(n_active - 1, int(n_active * cfg.split_max_frac)))
+    if cfg.split_mode == "threshold":
+        cand = avg_grad > cfg.split_grad_threshold
+        n_cand = int(cand.sum())
+        if n_cand > cap:                       # too many — keep the highest-grad cap
+            _, top_idx = avg_grad.topk(cap)
+            mask[top_idx] = True
+        else:
+            mask = cand
+        n_sel = int(mask.sum())
+        crit = f"threshold τ={cfg.split_grad_threshold:.3e} (cand={n_cand}, cap={cap})"
+    else:                                       # topk (default)
+        n_split = max(1, min(n_active - 1, int(n_active * cfg.split_frac)))
+        _, top_idx = avg_grad.topk(n_split)
+        mask[top_idx] = True
+        n_sel = int(mask.sum())
+        crit = f"topk frac={cfg.split_frac}"
+
+    print(f"[Level {level_idx}] Step {step} split-select [{crit}]: "
+          f"selected {n_sel}/{n_active} ({100.0*n_sel/max(1,n_active):.2f}%) | "
+          f"avg_grad p50={p50:.3e} p90={p90:.3e} p95={p95:.3e} "
+          f"p99={p99:.3e} max={gmax:.3e}")
+    return mask
 
 
 # ---------------------------------------------------------------------------
@@ -562,13 +610,9 @@ def run_levelN(cfg: EvoGSConfig, level_idx: int, device: str) -> str:
         if step > 0 and step % cfg.split_every == 0 and step <= cfg.split_until:
             n_active = len(splats["means"])
 
-            # Select top split_frac of leaves by average 2D gradient norm
+            # Select leaves to split (topk budget or gradient threshold)
             avg_grad = evo_state["grad2d"] / evo_state["count"].clamp_min(1)
-            n_split = max(1, int(n_active * cfg.split_frac))
-            n_split = min(n_split, n_active - 1)  # keep at least 1 leaf
-            _, top_idx = avg_grad.topk(n_split)
-            split_mask = torch.zeros(n_active, dtype=torch.bool, device=device)
-            split_mask[top_idx] = True
+            split_mask = _select_split_mask(avg_grad, cfg, level_idx, step)
 
             # EvoGS evolution split (symmetric: C1 = P + ψ, C2 = P - ψ)
             leaf_ids = tree.evo_split(split_mask, splats, optimizers, leaf_ids, level_idx)
@@ -748,11 +792,7 @@ def run_levelN_learned(cfg: EvoGSConfig, level_idx: int, device: str) -> str:
         if step > 0 and step % cfg.split_every == 0 and step <= cfg.split_until:
             n_active = lls.N
             avg_grad = evo_state["grad2d"] / evo_state["count"].clamp_min(1)
-            n_split = max(1, int(n_active * cfg.split_frac))
-            n_split = min(n_split, n_active - 1)
-            _, top_idx = avg_grad.topk(n_split)
-            split_mask = torch.zeros(n_active, dtype=torch.bool, device=device)
-            split_mask[top_idx] = True
+            split_mask = _select_split_mask(avg_grad, cfg, level_idx, step)
 
             lls.split(split_mask, level_idx)
 

@@ -1,0 +1,12 @@
+{
+  "level": 2,
+  "eval_factor": 2,
+  "streamed_raw_mb": 809.655016,
+  "streamed_q8_mb": 210.927804,
+  "streamed_zstd_mb": 163.66687,
+  "leaves_ply_mb": 677.163122,
+  "leaves_q8zstd_mb": 106.821699,
+  "psnr_full": 26.819379806518555,
+  "psnr_q8": 26.553518295288086,
+  "dpsnr": -0.26586151123046875
+}
